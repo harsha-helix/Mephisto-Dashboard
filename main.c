@@ -107,13 +107,13 @@ static void ADC0InitNineInputs(void)
     ADCSequenceDisable(ADC0_BASE, 1);
 
     ADCSequenceConfigure(ADC0_BASE, 0, ADC_TRIGGER_PROCESSOR, 0);
-    ADCSequenceStepConfigure(ADC0_BASE, 0, 0, ADC_CTL_CH0);
+    ADCSequenceStepConfigure(ADC0_BASE, 0, 0, ADC_CTL_CH12);
     ADCSequenceStepConfigure(ADC0_BASE, 0, 1, ADC_CTL_CH1);
     ADCSequenceStepConfigure(ADC0_BASE, 0, 2, ADC_CTL_CH2);
     ADCSequenceStepConfigure(ADC0_BASE, 0, 3, ADC_CTL_CH3);
     ADCSequenceStepConfigure(ADC0_BASE, 0, 4, ADC_CTL_CH4);
     ADCSequenceStepConfigure(ADC0_BASE, 0, 5, ADC_CTL_CH5);
-    ADCSequenceStepConfigure(ADC0_BASE, 0, 6, ADC_CTL_CH6);
+    ADCSequenceStepConfigure(ADC0_BASE, 0, 6, ADC_CTL_CH14);
     ADCSequenceStepConfigure(ADC0_BASE, 0, 7,
                              ADC_CTL_CH7 | ADC_CTL_IE | ADC_CTL_END);
 

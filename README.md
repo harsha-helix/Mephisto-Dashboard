@@ -28,13 +28,13 @@ ADC0 samples these analog channels:
 
 | Output Index | Signal Name | ADC Channel |
 | --- | --- | --- |
-| 0 | `diode_current_limit` | AIN0 |
+| 0 | `diode_current_limit` | AIN12 |
 | 1 | `diode_current_actual` | AIN1 |
 | 2 | `diode_temp_set` | AIN2 |
 | 3 | `diode_temp_actual` | AIN3 |
 | 4 | `diode_tec_err` | AIN4 |
 | 5 | `crystal_temp_set` | AIN5 |
-| 6 | `crystal_temp_actual` | AIN6 |
+| 6 | `crystal_temp_actual` | AIN14 |
 | 7 | `crystal_tec_err` | AIN7 |
 | 8 | `fault` | AIN8 |
 
