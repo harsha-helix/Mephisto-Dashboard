@@ -9,9 +9,19 @@
 #include "driverlib/gpio.h"
 #include "driverlib/uart.h"
 
-#define ADC_CHANNEL_COUNT 9
+#define ADC_CHANNEL_COUNT   9
 #define ADC_SEQUENCE0_COUNT 8
-#define ADC_SAMPLE_COUNT 10
+#define ADC_SAMPLE_COUNT    100
+
+/* ADC / scaling constants */
+#define ADC_REF_VOLTAGE  3.3f       /* Reference voltage in volts          */
+#define ADC_MAX_VALUE    4095.0f    /* 12-bit ADC full-scale count          */
+
+/* 1 ADC count = (3300 mV / 4095) ≈ 0.806 mV */
+#define MV_PER_ADC_COUNT (ADC_REF_VOLTAGE * 1000.0f / ADC_MAX_VALUE)
+
+#define DIODE_CURRENT_SCALE 1.0f   /* Amps per Volt  (set per your circuit) */
+#define DEG_C_PER_MV        0.01f   /* °C per mV                             */
 
 uint32_t diode_current_limit;
 uint32_t diode_current_actual;
@@ -23,15 +33,17 @@ uint32_t crystal_temp_actual;
 uint32_t crystal_tec_err;
 uint32_t fault;
 
+/* --------------------------------------------------------------------------
+ * UART0
+ * -------------------------------------------------------------------------- */
+
 static void UART0Init(void)
 {
     SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOA);
     SysCtlPeripheralEnable(SYSCTL_PERIPH_UART0);
 
-    while (!SysCtlPeripheralReady(SYSCTL_PERIPH_GPIOA)) {
-    }
-    while (!SysCtlPeripheralReady(SYSCTL_PERIPH_UART0)) {
-    }
+    while (!SysCtlPeripheralReady(SYSCTL_PERIPH_GPIOA)) {}
+    while (!SysCtlPeripheralReady(SYSCTL_PERIPH_UART0)) {}
 
     GPIOPinConfigure(GPIO_PA0_U0RX);
     GPIOPinConfigure(GPIO_PA1_U0TX);
@@ -52,7 +64,7 @@ static void UART0WriteString(const char *text)
 static void UART0WriteUInt(uint32_t value)
 {
     char buffer[10];
-    int index = 0;
+    int  index = 0;
 
     if (value == 0) {
         UARTCharPut(UART0_BASE, '0');
@@ -69,6 +81,20 @@ static void UART0WriteUInt(uint32_t value)
     }
 }
 
+/*
+ * Output format (Serial Studio / similar): /*val0,val1,...,val8* /\r\n
+ *
+ * Channel units transmitted:
+ *   [0] diode_current_limit   – mA   (integer)
+ *   [1] diode_current_actual  – mA   (integer)
+ *   [2] diode_temp_set        – °C   (whole degrees)
+ *   [3] diode_temp_actual     – °C   (whole degrees)
+ *   [4] diode_tec_err         – raw ADC count
+ *   [5] crystal_temp_set      – °C   (whole degrees)
+ *   [6] crystal_temp_actual   – °C   (whole degrees)
+ *   [7] crystal_tec_err       – raw ADC count
+ *   [8] fault                 – 0 or 1
+ */
 static void UART0WriteValues(const uint32_t values[ADC_CHANNEL_COUNT])
 {
     UART0WriteString("/*");
@@ -84,39 +110,45 @@ static void UART0WriteValues(const uint32_t values[ADC_CHANNEL_COUNT])
     UART0WriteString("*/\r\n");
 }
 
+/* --------------------------------------------------------------------------
+ * ADC0 — nine-input configuration
+ * -------------------------------------------------------------------------- */
+
 static void ADC0InitNineInputs(void)
 {
     SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOE);
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOB);
     SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOD);
     SysCtlPeripheralEnable(SYSCTL_PERIPH_ADC0);
 
-    while (!SysCtlPeripheralReady(SYSCTL_PERIPH_GPIOE)) {
-    }
-    while (!SysCtlPeripheralReady(SYSCTL_PERIPH_GPIOD)) {
-    }
-    while (!SysCtlPeripheralReady(SYSCTL_PERIPH_ADC0)) {
-    }
+    while (!SysCtlPeripheralReady(SYSCTL_PERIPH_GPIOE)) {}
+    while (!SysCtlPeripheralReady(SYSCTL_PERIPH_GPIOB)) {}
+    while (!SysCtlPeripheralReady(SYSCTL_PERIPH_GPIOD)) {}
+    while (!SysCtlPeripheralReady(SYSCTL_PERIPH_ADC0))  {}
 
     GPIOPinTypeADC(GPIO_PORTE_BASE,
-                   GPIO_PIN_5 | GPIO_PIN_3 | GPIO_PIN_2 |
+                   GPIO_PIN_5 | GPIO_PIN_4 | GPIO_PIN_3 | GPIO_PIN_2 |
                    GPIO_PIN_1 | GPIO_PIN_0);
+    GPIOPinTypeADC(GPIO_PORTB_BASE, GPIO_PIN_4);
     GPIOPinTypeADC(GPIO_PORTD_BASE,
                    GPIO_PIN_3 | GPIO_PIN_2 | GPIO_PIN_1 | GPIO_PIN_0);
 
     ADCSequenceDisable(ADC0_BASE, 0);
     ADCSequenceDisable(ADC0_BASE, 1);
 
+    /* Sequence 0: channels 0–7 (8 steps) */
     ADCSequenceConfigure(ADC0_BASE, 0, ADC_TRIGGER_PROCESSOR, 0);
-    ADCSequenceStepConfigure(ADC0_BASE, 0, 0, ADC_CTL_CH12);
+    ADCSequenceStepConfigure(ADC0_BASE, 0, 0, ADC_CTL_CH9);
     ADCSequenceStepConfigure(ADC0_BASE, 0, 1, ADC_CTL_CH1);
     ADCSequenceStepConfigure(ADC0_BASE, 0, 2, ADC_CTL_CH2);
     ADCSequenceStepConfigure(ADC0_BASE, 0, 3, ADC_CTL_CH3);
     ADCSequenceStepConfigure(ADC0_BASE, 0, 4, ADC_CTL_CH4);
     ADCSequenceStepConfigure(ADC0_BASE, 0, 5, ADC_CTL_CH5);
-    ADCSequenceStepConfigure(ADC0_BASE, 0, 6, ADC_CTL_CH14);
+    ADCSequenceStepConfigure(ADC0_BASE, 0, 6, ADC_CTL_CH10);
     ADCSequenceStepConfigure(ADC0_BASE, 0, 7,
                              ADC_CTL_CH7 | ADC_CTL_IE | ADC_CTL_END);
 
+    /* Sequence 1: channel 8 (1 step) */
     ADCSequenceConfigure(ADC0_BASE, 1, ADC_TRIGGER_PROCESSOR, 1);
     ADCSequenceStepConfigure(ADC0_BASE, 1, 0,
                              ADC_CTL_CH8 | ADC_CTL_IE | ADC_CTL_END);
@@ -133,14 +165,12 @@ static void ADC0ReadOnce(uint32_t values[ADC_CHANNEL_COUNT])
     uint32_t sequence1Value;
 
     ADCProcessorTrigger(ADC0_BASE, 0);
-    while (!ADCIntStatus(ADC0_BASE, 0, false)) {
-    }
+    while (!ADCIntStatus(ADC0_BASE, 0, false)) {}
     ADCIntClear(ADC0_BASE, 0);
     ADCSequenceDataGet(ADC0_BASE, 0, sequence0Values);
 
     ADCProcessorTrigger(ADC0_BASE, 1);
-    while (!ADCIntStatus(ADC0_BASE, 1, false)) {
-    }
+    while (!ADCIntStatus(ADC0_BASE, 1, false)) {}
     ADCIntClear(ADC0_BASE, 1);
     ADCSequenceDataGet(ADC0_BASE, 1, &sequence1Value);
 
@@ -154,105 +184,115 @@ static void ADC0ReadAveraged(uint32_t values[ADC_CHANNEL_COUNT])
 {
     uint32_t sums[ADC_CHANNEL_COUNT];
     uint32_t sampleValues[ADC_CHANNEL_COUNT];
+    uint32_t i;
 
-    for (uint32_t i = 0; i < ADC_CHANNEL_COUNT; i++) {
+    for (i = 0; i < ADC_CHANNEL_COUNT; i++) {
         sums[i] = 0;
     }
 
     for (uint32_t sample = 0; sample < ADC_SAMPLE_COUNT; sample++) {
         ADC0ReadOnce(sampleValues);
 
-        for (uint32_t i = 0; i < ADC_CHANNEL_COUNT; i++) {
+        for (i = 0; i < ADC_CHANNEL_COUNT; i++) {
             sums[i] += sampleValues[i];
         }
     }
 
-    for (uint32_t i = 0; i < ADC_CHANNEL_COUNT; i++) {
+    for (i = 0; i < ADC_CHANNEL_COUNT; i++) {
         values[i] = sums[i] / ADC_SAMPLE_COUNT;
     }
 }
 
+/* --------------------------------------------------------------------------
+ * Named variable store
+ * -------------------------------------------------------------------------- */
+
 static void StoreNamedValues(const uint32_t values[ADC_CHANNEL_COUNT])
 {
-    diode_current_limit = values[0];
+    diode_current_limit  = values[0];
     diode_current_actual = values[1];
-    diode_temp_set = values[2];
-    diode_temp_actual = values[3];
-    diode_tec_err = values[4];
-    crystal_temp_set = values[5];
-    crystal_temp_actual = values[6];
-    crystal_tec_err = values[7];
-    fault = values[8];
+    diode_temp_set       = values[2];
+    diode_temp_actual    = values[3];
+    diode_tec_err        = values[4];
+    crystal_temp_set     = values[5];
+    crystal_temp_actual  = values[6];
+    crystal_tec_err      = values[7];
+    fault                = values[8];
 }
 
-
-// Assume reference voltage is 3.3V and 12-bit ADC (4096 steps)
-#define ADC_REF_VOLTAGE 3.3f
-#define ADC_MAX_VALUE 4095.0f
-
-// User must set these scaling factors as per hardware
-#define DIODE_CURRENT_SCALE 1.0f   // Amps per Volt (set as per your circuit)
-#define TEMP_SCALE 0.1f            // deg C per mV
+/* --------------------------------------------------------------------------
+ * Engineering-unit conversion
+ *
+ * Temperature path:
+ *   ADC count → mV  (× MV_PER_ADC_COUNT ≈ 0.806 mV/count)
+ *   mV        → °C  (× DEG_C_PER_MV = 0.1 °C/mV)
+ *   °C        → 0.1°C integer (× 10) so one decimal place survives UART
+ *
+ * Current path:
+ *   ADC count → V  (÷ ADC_MAX_VALUE × ADC_REF_VOLTAGE)
+ *   V         → A  (× DIODE_CURRENT_SCALE)
+ *   A         → mA (× 1000)
+ * -------------------------------------------------------------------------- */
 
 static void ProcessAndBuildOutputValues(uint32_t values[ADC_CHANNEL_COUNT])
 {
-    // Convert ADC reading to voltage (V)
-    float v0 = (diode_current_limit / ADC_MAX_VALUE) * ADC_REF_VOLTAGE;
-    float v1 = (diode_current_actual / ADC_MAX_VALUE) * ADC_REF_VOLTAGE;
+    /* --- Diode current (mA) --- */
+    float v0 = ((float)diode_current_limit  / ADC_MAX_VALUE) * ADC_REF_VOLTAGE;
+    float v1 = ((float)diode_current_actual / ADC_MAX_VALUE) * ADC_REF_VOLTAGE;
 
-    // Diode current (A)
-    values[0] = (uint32_t)(v0 * DIODE_CURRENT_SCALE * 1000); // Output in mA for integer
-    values[1] = (uint32_t)(v1 * DIODE_CURRENT_SCALE * 1000); // Output in mA for integer
+    values[0] = (uint32_t)(v0 * DIODE_CURRENT_SCALE * 1000.0f);
+    values[1] = (uint32_t)(v1 * DIODE_CURRENT_SCALE * 1000.0f);
 
-    // Temperature readings (deg C)
-    // If ADC input is in mV, convert voltage to mV first
-    float t2 = ((diode_temp_set / ADC_MAX_VALUE) * ADC_REF_VOLTAGE) * 1000 * TEMP_SCALE;
-    float t3 = ((diode_temp_actual / ADC_MAX_VALUE) * ADC_REF_VOLTAGE) * 1000 * TEMP_SCALE;
-    float t5 = ((crystal_temp_set / ADC_MAX_VALUE) * ADC_REF_VOLTAGE) * 1000 * TEMP_SCALE;
-    float t6 = ((crystal_temp_actual / ADC_MAX_VALUE) * ADC_REF_VOLTAGE) * 1000 * TEMP_SCALE;
-    values[2] = (uint32_t)t2;
-    values[3] = (uint32_t)t3;
-    values[4] = diode_tec_err;
-    values[5] = (uint32_t)t5;
-    values[6] = (uint32_t)t6;
-    values[7] = crystal_tec_err;
+    /* --- Temperature (tenths of °C) --- */
+    /*
+     * Formula:  count × (3300 mV / 4095) × 0.1 °C/mV × 10  (for tenths)
+     *        =  count × MV_PER_ADC_COUNT × DEG_C_PER_MV × 10
+     */
+    values[2] = (uint32_t)((float)diode_temp_set      * MV_PER_ADC_COUNT * DEG_C_PER_MV);
+    values[3] = (uint32_t)((float)diode_temp_actual   * MV_PER_ADC_COUNT * DEG_C_PER_MV);
+    values[4] = diode_tec_err;      /* pass raw ADC count */
+    values[5] = (uint32_t)((float)crystal_temp_set    * MV_PER_ADC_COUNT * DEG_C_PER_MV);
+    values[6] = (uint32_t)((float)crystal_temp_actual * MV_PER_ADC_COUNT * DEG_C_PER_MV);
+    values[7] = crystal_tec_err;    /* pass raw ADC count */
 
-    // Fault: output 0 if below midpoint, else 1
-    values[8] = (fault < (ADC_MAX_VALUE / 2)) ? 0 : 1;
+    /* --- Fault: 0 below mid-scale, 1 at or above --- */
+    values[8] = (fault < (uint32_t)(ADC_MAX_VALUE / 2.0f)) ? 0u : 1u;
 }
+
+/* --------------------------------------------------------------------------
+ * Main
+ * -------------------------------------------------------------------------- */
 
 int main(void)
 {
     FPUEnable();
     FPULazyStackingEnable();
 
-    // Set clock to 40 MHz
+    /* 40 MHz system clock */
     SysCtlClockSet(SYSCTL_SYSDIV_5 | SYSCTL_USE_PLL |
                    SYSCTL_XTAL_16MHZ | SYSCTL_OSC_MAIN);
 
-    // Enable GPIOF
+    /* PF1 – heartbeat LED */
     SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOF);
-    while (!SysCtlPeripheralReady(SYSCTL_PERIPH_GPIOF)) {
-    }
-
-    // Set PF1 as output
+    while (!SysCtlPeripheralReady(SYSCTL_PERIPH_GPIOF)) {}
     GPIOPinTypeGPIOOutput(GPIO_PORTF_BASE, GPIO_PIN_1);
 
     UART0Init();
     ADC0InitNineInputs();
 
-    while(1)
+    while (1)
     {
         uint32_t values[ADC_CHANNEL_COUNT];
 
         ADC0ReadAveraged(values);
         StoreNamedValues(values);
-
         ProcessAndBuildOutputValues(values);
         UART0WriteValues(values);
 
+        /* Toggle heartbeat LED */
         GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_1,
                      GPIOPinRead(GPIO_PORTF_BASE, GPIO_PIN_1) ^ GPIO_PIN_1);
+
         SysCtlDelay(200000);
     }
 }

@@ -28,13 +28,13 @@ ADC0 samples these analog channels:
 
 | Output Index | Signal Name | ADC Channel |
 | --- | --- | --- |
-| 0 | `diode_current_limit` | AIN12 |
+| 0 | `diode_current_limit` | AIN9 |
 | 1 | `diode_current_actual` | AIN1 |
 | 2 | `diode_temp_set` | AIN2 |
 | 3 | `diode_temp_actual` | AIN3 |
 | 4 | `diode_tec_err` | AIN4 |
 | 5 | `crystal_temp_set` | AIN5 |
-| 6 | `crystal_temp_actual` | AIN14 |
+| 6 | `crystal_temp_actual` | AIN10 |
 | 7 | `crystal_tec_err` | AIN7 |
 | 8 | `fault` | AIN8 |
 
@@ -80,7 +80,7 @@ wrapped in `/* ... */`:
 /*805,402,165,166,112,164,165,161,0*/
 ```
 
-The firmware first averages 10 raw ADC samples per channel, then post-processes
+The firmware first averages 100 raw ADC samples per channel, then post-processes
 the averaged counts before printing:
 
 | Output Index | Signal Name | Printed Unit / Meaning |
