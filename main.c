@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <stdio.h>
 
 #include "inc/hw_memmap.h"
 #include "inc/hw_types.h"
@@ -11,27 +12,35 @@
 
 #define ADC_CHANNEL_COUNT   9
 #define ADC_SEQUENCE0_COUNT 8
-#define ADC_SAMPLE_COUNT    100
+#define ADC_SAMPLE_COUNT    500     /* 5× more averaging → smoother + slower output */
 
 /* ADC / scaling constants */
-#define ADC_REF_VOLTAGE  3.3f       /* Reference voltage in volts          */
-#define ADC_MAX_VALUE    4095.0f    /* 12-bit ADC full-scale count          */
+#define ADC_REF_VOLTAGE     3.3f        /* Reference voltage in volts           */
+#define ADC_MAX_VALUE       4095.0f     /* 12-bit ADC full-scale count          */
 
-/* 1 ADC count = (3300 mV / 4095) ≈ 0.806 mV */
-#define MV_PER_ADC_COUNT (ADC_REF_VOLTAGE * 1000.0f / ADC_MAX_VALUE)
+/* 1 ADC count → mV: (3300 mV / 4095) ≈ 0.8058 mV/count */
+#define MV_PER_ADC_COUNT    (ADC_REF_VOLTAGE * 1000.0f / ADC_MAX_VALUE)
 
-#define DIODE_CURRENT_SCALE 1.0f   /* Amps per Volt  (set per your circuit) */
-#define DEG_C_PER_MV        0.01f   /* °C per mV                             */
+/* LM35-style sensor: 10 mV/°C  →  0.1 °C/mV */
+#define DEG_C_PER_MV        0.1f
 
-uint32_t diode_current_limit;
-uint32_t diode_current_actual;
-uint32_t diode_temp_set;
-uint32_t diode_temp_actual;
-uint32_t diode_tec_err;
-uint32_t crystal_temp_set;
-uint32_t crystal_temp_actual;
-uint32_t crystal_tec_err;
-uint32_t fault;
+#define DIODE_CURRENT_SCALE 1.0f        /* Amps per Volt (set per your circuit) */
+
+/* Typed output union so we can send all nine channels as floats */
+typedef struct {
+    float diode_current_limit;   /* mA   */
+    float diode_current_actual;  /* mA   */
+    float diode_temp_set;        /* °C   */
+    float diode_temp_actual;     /* °C   */
+    float diode_tec_err;         /* mV   */
+    float crystal_temp_set;      /* °C   */
+    float crystal_temp_actual;   /* °C   */
+    float crystal_tec_err;       /* mV   */
+    float fault;                 /* 0.0 or 1.0 */
+} LaserChannels;
+
+/* Raw ADC store (averaged counts) */
+static uint32_t g_adcCounts[ADC_CHANNEL_COUNT];
 
 /* --------------------------------------------------------------------------
  * UART0
@@ -61,52 +70,74 @@ static void UART0WriteString(const char *text)
     }
 }
 
-static void UART0WriteUInt(uint32_t value)
+/* Write a float with two decimal places, e.g. "23.45" or "-1.20"
+ * Avoids pulling in the full printf machinery. */
+static void UART0WriteFloat(float value)
 {
-    char buffer[10];
-    int  index = 0;
+    char buf[16];
+    int  len = 0;
 
-    if (value == 0) {
-        UARTCharPut(UART0_BASE, '0');
-        return;
+    /* Handle negative */
+    if (value < 0.0f) {
+        UARTCharPut(UART0_BASE, '-');
+        value = -value;
     }
 
-    while (value > 0) {
-        buffer[index++] = (char)('0' + (value % 10));
-        value /= 10;
-    }
+    /* Round to 2 dp before splitting */
+    value += 0.005f;
 
-    while (index > 0) {
-        UARTCharPut(UART0_BASE, buffer[--index]);
+    uint32_t integer  = (uint32_t)value;
+    uint32_t fraction = (uint32_t)((value - (float)integer) * 100.0f);
+
+    /* Integer part (reverse into buf) */
+    if (integer == 0) {
+        buf[len++] = '0';
+    } else {
+        uint32_t tmp = integer;
+        while (tmp > 0) {
+            buf[len++] = (char)('0' + (tmp % 10));
+            tmp /= 10;
+        }
     }
+    /* Reverse */
+    for (int i = 0, j = len - 1; i < j; i++, j--) {
+        char t = buf[i]; buf[i] = buf[j]; buf[j] = t;
+    }
+    buf[len] = '\0';
+    UART0WriteString(buf);
+
+    /* Decimal part — always two digits */
+    UARTCharPut(UART0_BASE, '.');
+    UARTCharPut(UART0_BASE, (char)('0' + (fraction / 10)));
+    UARTCharPut(UART0_BASE, (char)('0' + (fraction % 10)));
 }
 
 /*
- * Output format (Serial Studio / similar): /*val0,val1,...,val8* /\r\n
+ * Output format:  /*f0,f1,f2,f3,f4,f5,f6,f7,f8* /\r\n
  *
- * Channel units transmitted:
- *   [0] diode_current_limit   – mA   (integer)
- *   [1] diode_current_actual  – mA   (integer)
- *   [2] diode_temp_set        – °C   (whole degrees)
- *   [3] diode_temp_actual     – °C   (whole degrees)
- *   [4] diode_tec_err         – raw ADC count
- *   [5] crystal_temp_set      – °C   (whole degrees)
- *   [6] crystal_temp_actual   – °C   (whole degrees)
- *   [7] crystal_tec_err       – raw ADC count
- *   [8] fault                 – 0 or 1
+ * All values are floats with 2 decimal places:
+ *   [0] diode_current_limit   – mA
+ *   [1] diode_current_actual  – mA
+ *   [2] diode_temp_set        – °C
+ *   [3] diode_temp_actual     – °C
+ *   [4] diode_tec_err         – mV
+ *   [5] crystal_temp_set      – °C
+ *   [6] crystal_temp_actual   – °C
+ *   [7] crystal_tec_err       – mV
+ *   [8] fault                 – 0.00 or 1.00
  */
-static void UART0WriteValues(const uint32_t values[ADC_CHANNEL_COUNT])
+static void UART0WriteChannels(const LaserChannels *ch)
 {
     UART0WriteString("/*");
-
-    for (uint32_t i = 0; i < ADC_CHANNEL_COUNT; i++) {
-        UART0WriteUInt(values[i]);
-
-        if (i + 1 < ADC_CHANNEL_COUNT) {
-            UARTCharPut(UART0_BASE, ',');
-        }
-    }
-
+    UART0WriteFloat(ch->diode_current_limit);   UARTCharPut(UART0_BASE, ',');
+    UART0WriteFloat(ch->diode_current_actual);  UARTCharPut(UART0_BASE, ',');
+    UART0WriteFloat(ch->diode_temp_set);        UARTCharPut(UART0_BASE, ',');
+    UART0WriteFloat(ch->diode_temp_actual);     UARTCharPut(UART0_BASE, ',');
+    UART0WriteFloat(ch->diode_tec_err);         UARTCharPut(UART0_BASE, ',');
+    UART0WriteFloat(ch->crystal_temp_set);      UARTCharPut(UART0_BASE, ',');
+    UART0WriteFloat(ch->crystal_temp_actual);   UARTCharPut(UART0_BASE, ',');
+    UART0WriteFloat(ch->crystal_tec_err);       UARTCharPut(UART0_BASE, ',');
+    UART0WriteFloat(ch->fault);
     UART0WriteString("*/\r\n");
 }
 
@@ -136,7 +167,7 @@ static void ADC0InitNineInputs(void)
     ADCSequenceDisable(ADC0_BASE, 0);
     ADCSequenceDisable(ADC0_BASE, 1);
 
-    /* Sequence 0: channels 0–7 (8 steps) */
+    /* Sequence 0: channels 0-7 (8 steps) */
     ADCSequenceConfigure(ADC0_BASE, 0, ADC_TRIGGER_PROCESSOR, 0);
     ADCSequenceStepConfigure(ADC0_BASE, 0, 0, ADC_CTL_CH9);
     ADCSequenceStepConfigure(ADC0_BASE, 0, 1, ADC_CTL_CH1);
@@ -161,102 +192,100 @@ static void ADC0InitNineInputs(void)
 
 static void ADC0ReadOnce(uint32_t values[ADC_CHANNEL_COUNT])
 {
-    uint32_t sequence0Values[ADC_SEQUENCE0_COUNT];
-    uint32_t sequence1Value;
+    uint32_t seq0[ADC_SEQUENCE0_COUNT];
+    uint32_t seq1;
 
     ADCProcessorTrigger(ADC0_BASE, 0);
     while (!ADCIntStatus(ADC0_BASE, 0, false)) {}
     ADCIntClear(ADC0_BASE, 0);
-    ADCSequenceDataGet(ADC0_BASE, 0, sequence0Values);
+    ADCSequenceDataGet(ADC0_BASE, 0, seq0);
 
     ADCProcessorTrigger(ADC0_BASE, 1);
     while (!ADCIntStatus(ADC0_BASE, 1, false)) {}
     ADCIntClear(ADC0_BASE, 1);
-    ADCSequenceDataGet(ADC0_BASE, 1, &sequence1Value);
+    ADCSequenceDataGet(ADC0_BASE, 1, &seq1);
 
     for (uint32_t i = 0; i < ADC_SEQUENCE0_COUNT; i++) {
-        values[i] = sequence0Values[i];
+        values[i] = seq0[i];
     }
-    values[8] = sequence1Value;
+    values[8] = seq1;
 }
 
 static void ADC0ReadAveraged(uint32_t values[ADC_CHANNEL_COUNT])
 {
     uint32_t sums[ADC_CHANNEL_COUNT];
-    uint32_t sampleValues[ADC_CHANNEL_COUNT];
+    uint32_t sample[ADC_CHANNEL_COUNT];
     uint32_t i;
 
     for (i = 0; i < ADC_CHANNEL_COUNT; i++) {
         sums[i] = 0;
     }
 
-    for (uint32_t sample = 0; sample < ADC_SAMPLE_COUNT; sample++) {
-        ADC0ReadOnce(sampleValues);
-
-        for (i = 0; i < ADC_CHANNEL_COUNT; i++) {
-            sums[i] += sampleValues[i];
+    for (uint32_t n = 0; n < ADC_SAMPLE_COUNT; n++) {
+        ADC0ReadOnce(sample);
+        for (uint32_t i = 0; i < ADC_CHANNEL_COUNT; i++) {
+            sums[i] += sample[i];
         }
+        /* ~1 ms dead time between samples at 40 MHz (40000 / 3 cycles per loop) */
+        SysCtlDelay(13333);
     }
 
-    for (i = 0; i < ADC_CHANNEL_COUNT; i++) {
+    for (uint32_t i = 0; i < ADC_CHANNEL_COUNT; i++) {
         values[i] = sums[i] / ADC_SAMPLE_COUNT;
     }
 }
 
 /* --------------------------------------------------------------------------
- * Named variable store
- * -------------------------------------------------------------------------- */
-
-static void StoreNamedValues(const uint32_t values[ADC_CHANNEL_COUNT])
-{
-    diode_current_limit  = values[0];
-    diode_current_actual = values[1];
-    diode_temp_set       = values[2];
-    diode_temp_actual    = values[3];
-    diode_tec_err        = values[4];
-    crystal_temp_set     = values[5];
-    crystal_temp_actual  = values[6];
-    crystal_tec_err      = values[7];
-    fault                = values[8];
-}
-
-/* --------------------------------------------------------------------------
  * Engineering-unit conversion
  *
- * Temperature path:
- *   ADC count → mV  (× MV_PER_ADC_COUNT ≈ 0.806 mV/count)
- *   mV        → °C  (× DEG_C_PER_MV = 0.1 °C/mV)
- *   °C        → 0.1°C integer (× 10) so one decimal place survives UART
+ * All paths work in floats from count to final unit:
  *
- * Current path:
- *   ADC count → V  (÷ ADC_MAX_VALUE × ADC_REF_VOLTAGE)
- *   V         → A  (× DIODE_CURRENT_SCALE)
- *   A         → mA (× 1000)
+ *   Temperature:
+ *     count × MV_PER_ADC_COUNT           → mV
+ *     mV    × DEG_C_PER_MV  (0.1 °C/mV) → °C   (correct for LM35-style)
+ *
+ *   Current:
+ *     count / ADC_MAX_VALUE × ADC_REF_VOLTAGE → V
+ *     V     × DIODE_CURRENT_SCALE             → A
+ *     A     × 1000                            → mA
+ *
+ *   TEC error:
+ *     count × MV_PER_ADC_COUNT → mV  (raw signal, sent as-is)
+ *
+ *   Fault:
+ *     0.0 below mid-scale, 1.0 at or above
  * -------------------------------------------------------------------------- */
 
-static void ProcessAndBuildOutputValues(uint32_t values[ADC_CHANNEL_COUNT])
+static void ConvertToEngUnits(const uint32_t counts[ADC_CHANNEL_COUNT],
+                               LaserChannels *ch)
 {
-    /* --- Diode current (mA) --- */
-    float v0 = ((float)diode_current_limit  / ADC_MAX_VALUE) * ADC_REF_VOLTAGE;
-    float v1 = ((float)diode_current_actual / ADC_MAX_VALUE) * ADC_REF_VOLTAGE;
+    /* Helper lambdas as inline expressions */
+    #define COUNT_TO_MV(c)  ((float)(c) * MV_PER_ADC_COUNT)
+    #define MV_TO_DEG(mv)   ((mv) * DEG_C_PER_MV)
+    #define COUNT_TO_DEG(c) MV_TO_DEG(COUNT_TO_MV(c))
 
-    values[0] = (uint32_t)(v0 * DIODE_CURRENT_SCALE * 1000.0f);
-    values[1] = (uint32_t)(v1 * DIODE_CURRENT_SCALE * 1000.0f);
+    /* Current: count → V → A → mA */
+    float v0 = ((float)counts[0] / ADC_MAX_VALUE) * ADC_REF_VOLTAGE;
+    float v1 = ((float)counts[1] / ADC_MAX_VALUE) * ADC_REF_VOLTAGE;
+    ch->diode_current_limit  = v0 * DIODE_CURRENT_SCALE * 1000.0f;
+    ch->diode_current_actual = v1 * DIODE_CURRENT_SCALE * 1000.0f;
 
-    /* --- Temperature (tenths of °C) --- */
-    /*
-     * Formula:  count × (3300 mV / 4095) × 0.1 °C/mV × 10  (for tenths)
-     *        =  count × MV_PER_ADC_COUNT × DEG_C_PER_MV × 10
-     */
-    values[2] = (uint32_t)((float)diode_temp_set      * MV_PER_ADC_COUNT * DEG_C_PER_MV);
-    values[3] = (uint32_t)((float)diode_temp_actual   * MV_PER_ADC_COUNT * DEG_C_PER_MV);
-    values[4] = diode_tec_err;      /* pass raw ADC count */
-    values[5] = (uint32_t)((float)crystal_temp_set    * MV_PER_ADC_COUNT * DEG_C_PER_MV);
-    values[6] = (uint32_t)((float)crystal_temp_actual * MV_PER_ADC_COUNT * DEG_C_PER_MV);
-    values[7] = crystal_tec_err;    /* pass raw ADC count */
+    /* Temperature: count → mV → °C */
+    ch->diode_temp_set      = COUNT_TO_DEG(counts[2]);
+    ch->diode_temp_actual   = COUNT_TO_DEG(counts[3]);
+    ch->crystal_temp_set    = COUNT_TO_DEG(counts[5]);
+    ch->crystal_temp_actual = COUNT_TO_DEG(counts[6]);
 
-    /* --- Fault: 0 below mid-scale, 1 at or above --- */
-    values[8] = (fault < (uint32_t)(ADC_MAX_VALUE / 2.0f)) ? 0u : 1u;
+    /* TEC error: count → mV */
+    ch->diode_tec_err   = COUNT_TO_MV(counts[4]);
+    ch->crystal_tec_err = COUNT_TO_MV(counts[7]);
+
+    /* Fault: digital threshold at mid-scale */
+    ch->fault = (counts[8] >= (uint32_t)(ADC_MAX_VALUE / 2.0f)) ? 1.0f : 0.0f;
+
+    #undef COUNT_TO_MV
+    #undef MV_TO_DEG
+    #undef COUNT_TO_DEG
 }
 
 /* --------------------------------------------------------------------------
@@ -282,17 +311,17 @@ int main(void)
 
     while (1)
     {
-        uint32_t values[ADC_CHANNEL_COUNT];
+        LaserChannels ch;
 
-        ADC0ReadAveraged(values);
-        StoreNamedValues(values);
-        ProcessAndBuildOutputValues(values);
-        UART0WriteValues(values);
+        ADC0ReadAveraged(g_adcCounts);
+        ConvertToEngUnits(g_adcCounts, &ch);
+        UART0WriteChannels(&ch);
 
         /* Toggle heartbeat LED */
         GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_1,
                      GPIOPinRead(GPIO_PORTF_BASE, GPIO_PIN_1) ^ GPIO_PIN_1);
 
-        SysCtlDelay(200000);
+        /* ~1 s dead time after each output frame (40 MHz / 3 cycles per loop) */
+        SysCtlDelay(1333333);
     }
 }

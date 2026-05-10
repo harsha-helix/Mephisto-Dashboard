@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Laser Controller Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:       #0d0f0e;
+    --bg2:      #161918;
+    --bg3:      #1e2221;
+    --border:   rgba(255,255,255,0.07);
+    --border2:  rgba(255,255,255,0.13);
+    --text:     #e8ebe9;
+    --muted:    #6b7570;
+    --accent:   #39d98a;
+    --amber:    #f0a500;
+    --red:      #f04040;
+    --blue:     #4a9eff;
+    --purple:   #a07df0;
+    --coral:    #f07050;
+    --grid:     rgba(255,255,255,0.04);
+    --tick:     #4a4f4c;
+    --radius:   6px;
+    --radius-lg: 10px;
+  }
+
+  html, body { height: 100%; background: var(--bg); color: var(--text); font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace; font-size: 13px; }
+
+  body { display: flex; flex-direction: column; min-height: 100vh; }
+
+  /* ── top bar ── */
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg2);
+    position: sticky; top: 0; z-index: 10;
+    flex-shrink: 0;
+  }
+
+  .hdr-left { display: flex; align-items: center; gap: 14px; }
+
+  .logo {
+    font-size: 11px; font-weight: 700; letter-spacing: 0.18em;
+    text-transform: uppercase; color: var(--accent);
+  }
+
+  .sep { color: var(--border2); }
+
+  #statusDot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--muted); flex-shrink: 0;
+    transition: background 0.3s;
+  }
+  #statusDot.live { background: var(--accent); animation: blink 2s ease-in-out infinite; }
+  #statusDot.err  { background: var(--red); }
+
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.35} }
+
+  #statusLabel { color: var(--muted); font-size: 11px; }
+
+  .hdr-right { display: flex; align-items: center; gap: 8px; }
+
+  select, button {
+    font-family: inherit; font-size: 11px;
+    background: var(--bg3); color: var(--text);
+    border: 1px solid var(--border2);
+    border-radius: var(--radius);
+    padding: 5px 10px; cursor: pointer;
+    outline: none; transition: border-color 0.2s, background 0.2s;
+  }
+  select:hover, button:hover { border-color: rgba(255,255,255,0.25); background: #252a28; }
+  select:focus { border-color: var(--accent); }
+
+  #btnConnect { color: var(--accent); border-color: rgba(57,217,138,0.35); }
+  #btnConnect:hover { background: rgba(57,217,138,0.08); }
+  #btnConnect.disc { color: var(--red); border-color: rgba(240,64,64,0.35); }
+  #btnConnect.disc:hover { background: rgba(240,64,64,0.08); }
+
+  #btnSim { color: var(--blue); border-color: rgba(74,158,255,0.35); }
+  #btnSim:hover { background: rgba(74,158,255,0.08); }
+  #btnSim.active { color: var(--amber); border-color: rgba(240,165,0,0.35); }
+
+  #btnRecord { color: var(--amber); border-color: rgba(240,165,0,0.35); }
+  #btnRecord:hover { background: rgba(240,165,0,0.08); }
+  #btnRecord.recording { color: var(--red); border-color: rgba(240,64,64,0.35); animation: blink 1s ease-in-out infinite; }
+  #btnSaveCSV { color: var(--accent); border-color: rgba(57,217,138,0.35); }
+  #btnSaveCSV:hover { background: rgba(57,217,138,0.08); }
+  #btnSaveCSV:disabled { opacity: 0.35; cursor: default; pointer-events: none; }
+  #recCount { font-size: 10px; color: var(--muted); min-width: 52px; text-align: right; }
+
+  /* ── fault banner ── */
+  #faultBanner {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 20px; font-size: 11px; letter-spacing: 0.06em;
+    background: rgba(57,217,138,0.07);
+    border-bottom: 1px solid rgba(57,217,138,0.2);
+    color: var(--accent);
+    transition: background 0.3s, border-color 0.3s, color 0.3s;
+    flex-shrink: 0;
+  }
+  #faultBanner.fault {
+    background: rgba(240,64,64,0.1);
+    border-color: rgba(240,64,64,0.4);
+    color: var(--red);
+    animation: flashbg 0.7s step-start infinite;
+  }
+  @keyframes flashbg { 0%,100%{opacity:1} 50%{opacity:0.65} }
+  .fbdot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+  /* ── main layout ── */
+  main { flex: 1; padding: 16px 20px; display: flex; flex-direction: column; gap: 14px; }
+
+  /* ── metrics row ── */
+  .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+
+  .metric {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 12px 14px;
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  .metric-label { font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
+  .metric-value { font-size: 22px; font-weight: 700; letter-spacing: -0.02em; color: var(--text); font-variant-numeric: tabular-nums; }
+  .metric-unit  { font-size: 10px; color: var(--muted); margin-left: 3px; font-weight: 400; }
+  .metric.fault-flash .metric-value { color: var(--red); }
+
+  /* ── charts grid ── */
+  .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; flex: 1; }
+
+  .chart-card {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 14px 16px 10px;
+    display: flex; flex-direction: column;
+  }
+  .chart-title { font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); margin-bottom: 10px; }
+  .chart-wrap { position: relative; flex: 1; min-height: 140px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; }
+  .legend-item { display: flex; align-items: center; gap: 5px; font-size: 9px; color: var(--muted); }
+  .lsw { width: 18px; height: 2px; border-radius: 1px; }
+  .lsw.dash { background: repeating-linear-gradient(90deg, currentColor 0, currentColor 3px, transparent 3px, transparent 6px); }
+
+  /* ── log strip ── */
+  #log {
+    background: var(--bg2); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 8px 12px;
+    font-size: 10px; color: var(--muted);
+    height: 52px; overflow: hidden;
+    flex-shrink: 0;
+  }
+  .log-line { margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* ── no-serial notice ── */
+  #noSerial {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.75);
+    align-items: center; justify-content: center;
+    z-index: 100;
+  }
+  .notice-box {
+    background: var(--bg2); border: 1px solid var(--border2);
+    border-radius: var(--radius-lg); padding: 28px 32px;
+    max-width: 420px; text-align: center; line-height: 1.8;
+  }
+  .notice-box h2 { color: var(--amber); margin-bottom: 10px; font-size: 14px; }
+  .notice-box p  { color: var(--muted); font-size: 11px; }
+  .notice-box code { color: var(--accent); background: var(--bg3); padding: 2px 6px; border-radius: 4px; }
+  .notice-close { margin-top: 16px; }
+</style>
+</head>
+<body>
+
+<div id="noSerial">
+  <div class="notice-box">
+    <h2>Web Serial not available</h2>
+    <p>Use <strong>Chrome</strong> or <strong>Edge</strong> and serve this file over localhost, e.g.:</p>
+    <p style="margin-top:10px"><code>python -m http.server 8080</code></p>
+    <p style="margin-top:6px">then open <code>http://localhost:8080</code></p>
+    <button class="notice-close" onclick="document.getElementById('noSerial').style.display='none'">ok, got it</button>
+  </div>
+</div>
+
+<header>
+  <div class="hdr-left">
+    <span class="logo">laser ctrl</span>
+    <span class="sep">|</span>
+    <div id="statusDot"></div>
+    <span id="statusLabel">disconnected</span>
+  </div>
+  <div class="hdr-right">
+    <select id="baudSel">
+      <option value="9600">9600 baud</option>
+      <option value="115200" selected>115200 baud</option>
+      <option value="230400">230400 baud</option>
+    </select>
+    <button id="btnConnect" onclick="connectSerial()">connect</button>
+    <button id="btnSim" onclick="toggleSim()">simulate</button>
+    <button id="btnRecord" onclick="toggleRecord()">&#9679; record</button>
+    <span id="recCount">0 rows</span>
+    <button id="btnSaveCSV" onclick="saveCSV()" disabled>save csv</button>
+  </div>
+</header>
+
+<div id="faultBanner">
+  <div class="fbdot"></div>
+  <span id="faultText">no fault &nbsp;—&nbsp; system nominal</span>
+</div>
+
+<main>
+  <div class="metrics">
+    <div class="metric" id="mCL">
+      <div class="metric-label">current limit</div>
+      <div class="metric-value" id="vCL">--<span class="metric-unit">mA</span></div>
+    </div>
+    <div class="metric" id="mCA">
+      <div class="metric-label">current actual</div>
+      <div class="metric-value" id="vCA">--<span class="metric-unit">mA</span></div>
+    </div>
+    <div class="metric" id="mDT">
+      <div class="metric-label">diode temp</div>
+      <div class="metric-value" id="vDT">--<span class="metric-unit">°C</span></div>
+    </div>
+    <div class="metric" id="mCT">
+      <div class="metric-label">crystal temp</div>
+      <div class="metric-value" id="vCT">--<span class="metric-unit">°C</span></div>
+    </div>
+  </div>
+
+  <div class="charts">
+    <div class="chart-card">
+      <div class="chart-title">diode current</div>
+      <div class="chart-wrap"><canvas id="cCurrent"></canvas></div>
+      <div class="legend">
+        <div class="legend-item"><div class="lsw dash" style="color:#4a9eff"></div>limit</div>
+        <div class="legend-item"><div class="lsw" style="background:#39d98a"></div>actual</div>
+      </div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">temperatures</div>
+      <div class="chart-wrap"><canvas id="cTemp"></canvas></div>
+      <div class="legend">
+        <div class="legend-item"><div class="lsw dash" style="color:#f07050"></div>diode set</div>
+        <div class="legend-item"><div class="lsw" style="background:#f0a500"></div>diode actual</div>
+        <div class="legend-item"><div class="lsw dash" style="color:#a07df0"></div>crystal set</div>
+        <div class="legend-item"><div class="lsw" style="background:#c8a0ff"></div>crystal actual</div>
+      </div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">TEC control errors (raw ADC)</div>
+      <div class="chart-wrap"><canvas id="cErr"></canvas></div>
+      <div class="legend">
+        <div class="legend-item"><div class="lsw" style="background:#f07050"></div>diode</div>
+        <div class="legend-item"><div class="lsw" style="background:#a07df0"></div>crystal</div>
+      </div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">diode temp error (set − actual)</div>
+      <div class="chart-wrap"><canvas id="cDiff"></canvas></div>
+      <div class="legend">
+        <div class="legend-item"><div class="lsw" style="background:#4a9eff"></div>Δ °C</div>
+      </div>
+    </div>
+  </div>
+
+  <div id="log"></div>
+</main>
+
+<script>
+const MAX_PTS = 100;
+
+function makeChart(id, datasets, unit) {
+  const ctx = document.getElementById(id);
+  return new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: [],
+      datasets: datasets.map(d => ({
+        label: d.label,
+        data: [],
+        borderColor: d.color,
+        borderWidth: 1.5,
+        borderDash: d.dash || [],
+        pointRadius: 0,
+        tension: 0.35,
+        fill: false,
+      }))
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: '#1e2221',
+          borderColor: 'rgba(255,255,255,0.1)',
+          borderWidth: 1,
+          titleColor: '#6b7570',
+          bodyColor: '#e8ebe9',
+          titleFont: { family: 'monospace', size: 10 },
+          bodyFont: { family: 'monospace', size: 11 },
+          callbacks: { label: ctx => ` ${ctx.dataset.label}: ${ctx.parsed.y.toFixed(1)}${unit}` }
+        }
+      },
+      scales: {
+        x: { display: false },
+        y: {
+          grid: { color: 'rgba(255,255,255,0.04)' },
+          border: { color: 'rgba(255,255,255,0.07)' },
+          ticks: {
+            color: '#4a4f4c',
+            font: { family: 'monospace', size: 9 },
+            maxTicksLimit: 5,
+            callback: v => v.toFixed(0) + unit
+          }
+        }
+      }
+    }
+  });
+}
+
+const charts = {
+  current: makeChart('cCurrent', [
+    { label: 'limit',  color: '#4a9eff', dash: [5,3] },
+    { label: 'actual', color: '#39d98a' }
+  ], 'mA'),
+  temp: makeChart('cTemp', [
+    { label: 'diode set',     color: '#f07050', dash: [5,3] },
+    { label: 'diode actual',  color: '#f0a500' },
+    { label: 'crystal set',   color: '#a07df0', dash: [5,3] },
+    { label: 'crystal actual',color: '#c8a0ff' }
+  ], '°C'),
+  err: makeChart('cErr', [
+    { label: 'diode',   color: '#f07050' },
+    { label: 'crystal', color: '#a07df0' }
+  ], ''),
+  diff: makeChart('cDiff', [
+    { label: 'Δtemp', color: '#4a9eff' }
+  ], '°C')
+};
+
+let tick = 0;
+function pushData(vals) {
+  const [cl, ca, dts, dta, dtec, cts, cta, ctec, fault] = vals;
+  const lbl = String(tick++);
+
+  function feed(chart, ...pts) {
+    chart.data.labels.push(lbl);
+    pts.forEach((p, i) => chart.data.datasets[i].data.push(p));
+    if (chart.data.labels.length > MAX_PTS) {
+      chart.data.labels.shift();
+      chart.data.datasets.forEach(d => d.data.shift());
+    }
+    chart.update('none');
+  }
+
+  feed(charts.current, cl, ca);
+  feed(charts.temp, dts, dta, cts, cta);
+  feed(charts.err, dtec, ctec);
+  feed(charts.diff, dts - dta);
+
+  // metrics
+  function setVal(id, v, dp) {
+    const el = document.getElementById(id);
+    const unit = el.querySelector('.metric-unit').outerHTML;
+    el.innerHTML = v.toFixed(dp) + unit;
+  }
+  setVal('vCL', cl, 0);
+  setVal('vCA', ca, 0);
+  setVal('vDT', dta, 1);
+  setVal('vCT', cta, 1);
+
+  const faultOn = fault >= 1;
+  const banner = document.getElementById('faultBanner');
+  banner.className = faultOn ? 'fault' : '';
+  document.getElementById('faultText').textContent = faultOn
+    ? '⚠  FAULT DETECTED — check system'
+    : 'no fault \u00a0—\u00a0 system nominal';
+
+  ['mCL','mCA','mDT','mCT'].forEach(id => {
+    document.getElementById(id).classList.toggle('fault-flash', faultOn);
+  });
+
+  recordRow(vals);
+  addLog(`[${vals.map(v => (typeof v === 'number' ? v.toFixed(1) : v)).join(',')}]`);
+}
+
+function addLog(msg) {
+  const area = document.getElementById('log');
+  const line = document.createElement('div');
+  line.className = 'log-line';
+  line.textContent = new Date().toTimeString().slice(0,8) + '  ' + msg;
+  area.prepend(line);
+  while (area.children.length > 5) area.removeChild(area.lastChild);
+}
+
+// ── CSV recording ──
+const CSV_HEADER = 'timestamp,diode_current_limit_mA,diode_current_actual_mA,diode_temp_set_C,diode_temp_actual_C,diode_tec_err_mV,crystal_temp_set_C,crystal_temp_actual_C,crystal_tec_err_mV,fault\n';
+let csvRows = [];
+let recording = false;
+
+function toggleRecord() {
+  recording = !recording;
+  const btn = document.getElementById('btnRecord');
+  if (recording) {
+    btn.classList.add('recording');
+    btn.textContent = '\u25fc stop';
+    addLog('recording started');
+  } else {
+    btn.classList.remove('recording');
+    btn.textContent = '\u25cf record';
+    document.getElementById('btnSaveCSV').disabled = csvRows.length === 0;
+    addLog('recording stopped \u2014 ' + csvRows.length + ' rows');
+  }
+}
+
+function saveCSV() {
+  if (csvRows.length === 0) return;
+  const blob = new Blob([CSV_HEADER + csvRows.join('\n')], { type: 'text/csv' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  const ts   = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  a.href = url;
+  a.download = 'laser_log_' + ts + '.csv';
+  a.click();
+  URL.revokeObjectURL(url);
+  addLog('saved ' + csvRows.length + ' rows \u2192 ' + a.download);
+}
+
+function recordRow(vals) {
+  if (!recording) return;
+  const ts = new Date().toISOString();
+  csvRows.push(ts + ',' + vals.map(v => v.toFixed(2)).join(','));
+  document.getElementById('recCount').textContent = csvRows.length + ' rows';
+  document.getElementById('btnSaveCSV').disabled = false;
+}
+
+// ── serial ──
+let port = null, reader = null, buf = '';
+
+function setStatus(state) {
+  const dot = document.getElementById('statusDot');
+  const lbl = document.getElementById('statusLabel');
+  const btn = document.getElementById('btnConnect');
+  dot.className = state === 'live' ? 'live' : state === 'err' ? 'err' : '';
+  lbl.textContent = state === 'live' ? 'connected' : state === 'err' ? 'error' : 'disconnected';
+  if (state === 'live') {
+    btn.textContent = 'disconnect';
+    btn.classList.add('disc');
+    btn.onclick = disconnectSerial;
+  } else {
+    btn.textContent = 'connect';
+    btn.classList.remove('disc');
+    btn.onclick = connectSerial;
+  }
+}
+
+async function connectSerial() {
+  if (!('serial' in navigator)) {
+    document.getElementById('noSerial').style.display = 'flex';
+    return;
+  }
+  try {
+    port = await navigator.serial.requestPort();
+    const baud = parseInt(document.getElementById('baudSel').value);
+    await port.open({ baudRate: baud });
+    setStatus('live');
+    addLog(`connected @ ${baud} baud`);
+    readLoop();
+  } catch (e) {
+    addLog('error: ' + e.message);
+    setStatus('err');
+  }
+}
+
+async function disconnectSerial() {
+  stopSim();
+  try { if (reader) await reader.cancel(); } catch {}
+  try { if (port)   await port.close();   } catch {}
+  reader = null; port = null;
+  setStatus('disconnected');
+  addLog('disconnected');
+}
+
+async function readLoop() {
+  const ds = new TextDecoderStream();
+  port.readable.pipeTo(ds.writable);
+  reader = ds.readable.getReader();
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += value;
+      let s, e;
+      while ((s = buf.indexOf('/*')) !== -1 && (e = buf.indexOf('*/', s + 2)) !== -1) {
+        const frame = buf.slice(s + 2, e);
+        buf = buf.slice(e + 2);
+        const parts = frame.split(',').map(Number);
+        if (parts.length === 9 && parts.every(v => !isNaN(v))) {
+          pushData(parts);
+        } else {
+          addLog('bad frame: ' + frame.slice(0, 50));
+        }
+      }
+      if (buf.length > 512) buf = buf.slice(-128);
+    }
+  } catch (e) {
+    if (port) { addLog('read err: ' + e.message); setStatus('err'); }
+  }
+}
+
+// ── simulator ──
+let simTimer = null, simT = 0;
+
+function toggleSim() {
+  const btn = document.getElementById('btnSim');
+  if (simTimer) {
+    stopSim(); return;
+  }
+  btn.textContent = 'stop sim';
+  btn.classList.add('active');
+  setStatus('live');
+  addLog('simulation started');
+  simTimer = setInterval(() => {
+    simT += 0.12;
+    const cl  = 800 + 50  * Math.sin(simT * 0.3);
+    const ca  = cl  - 20  + 10 * Math.sin(simT * 1.1);
+    const dts = 25  + 2   * Math.sin(simT * 0.2);
+    const dta = dts - 0.3 + 0.4 * Math.sin(simT * 2.3);
+    const dtec = 200 + 60 * Math.sin(simT * 0.7);
+    const cts = 30  + 1.5 * Math.cos(simT * 0.15);
+    const cta = cts + 0.2 * Math.sin(simT * 1.8);
+    const ctec = 180 + 40 * Math.cos(simT * 0.9);
+    const fault = (simT % 30 > 27) ? 1 : 0;
+    pushData([cl, ca, dts, dta, dtec, cts, cta, ctec, fault]);
+  }, 200);
+}
+
+function stopSim() {
+  if (simTimer) { clearInterval(simTimer); simTimer = null; }
+  const btn = document.getElementById('btnSim');
+  btn.textContent = 'simulate';
+  btn.classList.remove('active');
+  setStatus('disconnected');
+  addLog('simulation stopped');
+}
+</script>
+</body>
+</html>

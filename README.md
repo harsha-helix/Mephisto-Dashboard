@@ -12,6 +12,8 @@ ADC inputs, averages the readings, and streams the values over UART0.
 - `linker.ld` - linker script for 256 KB flash and 32 KB RAM.
 - `Makefile` - build, flash, and clean targets.
 - `read_adc.py` - helper script for reading serial ADC output from a PC.
+- `laser_dashboard.html` - browser visualization dashboard for live serial
+  data. See `laser_dashboard_README.md`.
 
 ## Hardware
 
